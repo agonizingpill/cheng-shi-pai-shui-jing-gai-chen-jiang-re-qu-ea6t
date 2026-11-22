@@ -126,3 +126,38 @@ class AuditLog(Base):
     entity_id = Column(String(80), nullable=True)
     detail = Column(JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+
+class LineageJob(Base):
+    __tablename__ = "lineage_jobs"
+    id = Column(Integer, primary_key=True)
+    job_code = Column(String(60), unique=True, nullable=False)
+    anchor_batch_id = Column(Integer, ForeignKey("survey_batches.id"), nullable=False)
+    status = Column(String(30), nullable=False, default="queued")
+    checkpoint = Column(JSON, nullable=False, default=dict)
+    error = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+    finished_at = Column(DateTime(timezone=True), nullable=True)
+
+class ZoneLineageLink(Base):
+    __tablename__ = "zone_lineage_links"
+    id = Column(Integer, primary_key=True)
+    segment_key = Column(String(40), nullable=False)
+    from_zone_id = Column(Integer, ForeignKey("repair_zones.id"), nullable=True)
+    to_zone_id = Column(Integer, ForeignKey("repair_zones.id"), nullable=True)
+    link_type = Column(String(20), nullable=False)
+    shared_manhole_ids = Column(JSON, nullable=False, default=list)
+    status = Column(String(20), nullable=False, default="staged")
+    job_id = Column(Integer, ForeignKey("lineage_jobs.id"), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+
+class ManholeZoneMembership(Base):
+    __tablename__ = "manhole_zone_memberships"
+    id = Column(Integer, primary_key=True)
+    manhole_id = Column(Integer, ForeignKey("manhole_assets.id"), nullable=False)
+    batch_id = Column(Integer, ForeignKey("survey_batches.id"), nullable=False)
+    zone_id = Column(Integer, ForeignKey("repair_zones.id"), nullable=True)
+    presence = Column(String(20), nullable=False, default="measured")
+    confirm_status = Column(String(30), nullable=False, default="confirmed")
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+    __table_args__ = (UniqueConstraint("manhole_id", "batch_id", name="uq_membership_manhole_batch"),)

@@ -17,3 +17,5 @@ export const acknowledgeNotice=id=>api(`/work-notices/${id}/acknowledge`,{method
 export const startRepair=id=>api(`/zones/${id}/start-repair`,{method:'POST'});
 export const submitResurvey=(id,payload)=>api(`/zones/${id}/resurvey`,{method:'POST',body:JSON.stringify(payload)});
 export const verifyResurvey=id=>api(`/resurveys/${id}/verify`,{method:'POST'});
+export const manholeHistory=code=>api(`/lineage/manholes/${encodeURIComponent(code)}/history`);
+export const rebuildLineage=id=>api(`/lineage/rebuild/${id}`,{method:'POST'});

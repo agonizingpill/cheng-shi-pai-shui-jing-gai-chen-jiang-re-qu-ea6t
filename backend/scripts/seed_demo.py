@@ -1,8 +1,9 @@
 from datetime import datetime, timezone
 from sqlalchemy import select
 from src.database import Base, SessionLocal, engine
-from src.models import User, ManholeAsset, SurveyBatch, SurveyPoint, WorkNotice
+from src.models import AnalysisJob, SurveyBatch, SurveyPoint, User, ManholeAsset, WorkNotice
 from src.security import hash_password
+from src.services.cluster import build_input, cluster_batch
 
 def dt(day, hour, minute=0):
     return datetime(2026, 11, day, hour, minute, tzinfo=timezone.utc)
@@ -40,10 +41,25 @@ def seed():
                 settlement = round(9.4 + (i % 4) * 1.7, 2) if i <= 10 else round(13.0 + (i % 5) * 1.9, 2)
                 ref = "CGCS2000" if i == 20 else "WGS84-METER"
                 db.add(SurveyPoint(point_code=f"SP-1121-{i:02d}", batch_id=batch.id, manhole_id=asset.id, x=asset.x, y=asset.y, elevation_mm=round(101230.0 - settlement, 2), settlement_mm=settlement, coordinate_reference=ref, measured_at=dt(21, 7, 30), quality_status="datum_conflict" if i == 20 else "checked"))
+        prev_batch, _ = get_or_create(db, SurveyBatch, {"batch_code": "SURV-2026-1107-AM"}, {"measured_at": dt(7, 7, 30), "instrument": "Leica MS60 / RUN-1107-AM", "coordinate_reference": "WGS84-METER", "status": "open", "notes": "上一巡测周期基准批次，已出片并作为沿革起点"})
+        if not db.execute(select(SurveyPoint).where(SurveyPoint.batch_id == prev_batch.id)).scalars().all():
+            for i, asset in enumerate(assets, 1):
+                settlement = round(8.8 + (i % 4) * 1.6, 2) if i <= 10 else round(12.3 + (i % 5) * 1.8, 2)
+                db.add(SurveyPoint(point_code=f"SP-1107-{i:02d}", batch_id=prev_batch.id, manhole_id=asset.id, x=asset.x, y=asset.y, elevation_mm=round(101230.0 - settlement, 2), settlement_mm=settlement, coordinate_reference="WGS84-METER", measured_at=dt(7, 7, 30), quality_status="checked"))
+            db.commit()
+        if prev_batch.status == "open" and db.execute(select(SurveyPoint).where(SurveyPoint.batch_id == prev_batch.id)).scalars().all():
+            job = AnalysisJob(job_code=f"JOB-{prev_batch.batch_code}-SEED", batch_id=prev_batch.id, status="queued", input_summary={"points": build_input(db, prev_batch), "params": {"eps_m": 26.0, "min_samples": 3}})
+            db.add(job); db.commit(); db.refresh(job)
+            cluster_batch(db, job.id)
+        late_batch, _ = get_or_create(db, SurveyBatch, {"batch_code": "SURV-2026-1114-PM"}, {"measured_at": dt(14, 15, 40), "instrument": "Leica MS60 / RUN-1114-PM", "coordinate_reference": "WGS84-METER", "status": "open", "notes": "迟到补录批次：西环路 MH-016~MH-020 围挡内漏测，出片后按巡测日期插回沿革"})
+        if not db.execute(select(SurveyPoint).where(SurveyPoint.batch_id == late_batch.id)).scalars().all():
+            for i, asset in enumerate(assets[:15], 1):
+                settlement = round(9.1 + (i % 4) * 1.65, 2) if i <= 10 else round(12.6 + (i % 5) * 1.85, 2)
+                db.add(SurveyPoint(point_code=f"SP-1114-{i:02d}", batch_id=late_batch.id, manhole_id=asset.id, x=asset.x, y=asset.y, elevation_mm=round(101230.0 - settlement, 2), settlement_mm=settlement, coordinate_reference="WGS84-METER", measured_at=dt(14, 15, 40), quality_status="checked"))
         supervisor = db.execute(select(User).where(User.username == "supervisor")).scalar_one()
         get_or_create(db, WorkNotice, {"notice_code": "WN-XH-20261121"}, {"zone_id": None, "road_name": "西环路雨污分流施工段", "contractor": "城建二公司市政一队", "permit_no": "SG-2026-XH-041", "starts_at": dt(21, 8), "ends_at": dt(25, 18), "boundary": {"min_x": 1098, "max_x": 1155, "min_y": 1968, "max_y": 2020}, "status": "active", "lane_closure_required": True, "conflict_note": "施工围挡占用西环路北侧慢车道", "created_by": supervisor.id})
         db.commit()
-        print("seed_demo: users=3 assets=20 points=20 notices=1")
+        print("seed_demo: users=3 assets=20 batches=3(1 预出片) points=55 notices=1")
     finally:
         db.close()
 

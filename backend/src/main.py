@@ -8,12 +8,13 @@ from redis import Redis
 
 from .operations_evidence import router as operations_evidence
 from .database import Base, SessionLocal, engine, get_db
-from .models import AnalysisJob, AuditLog, ManholeAsset, RepairZone, Resurvey, SurveyBatch, SurveyPoint, User, WorkNotice
+from .models import AnalysisJob, AuditLog, LineageJob, ManholeAsset, RepairZone, Resurvey, SurveyBatch, SurveyPoint, User, WorkNotice
 from .schemas import BatchIn, LoginIn, NoticeIn, ResurveyIn, SurveyPointIn
 from .security import create_token, current_user, require_roles, verify_password
 from .services.audit import record
 from .services.cluster import build_input
 from .services.geometry import bounds, overlaps
+from .services.lineage import enqueue_lineage, lineage_links_view, manhole_history
 from .middlewares.audit import RequestAuditMiddleware
 from .middlewares.rate_limit import SimpleRateLimitMiddleware
 
@@ -63,6 +64,11 @@ def notice_view(n):
 def resurvey_view(r):
     return {"id": r.id, "record_code": r.record_code, "zone_id": r.zone_id, "measured_at": iso(r.measured_at), "settlement_before_mm": r.settlement_before_mm, "settlement_after_mm": r.settlement_after_mm, "delta_mm": r.delta_mm, "pass_fail": r.pass_fail, "status": r.status, "verified_by": r.verified_by, "notes": r.notes}
 
+def lineage_job_view(j):
+    checkpoint = j.checkpoint or {}
+    plan = checkpoint.get("plan", {})
+    return {"id": j.id, "job_code": j.job_code, "anchor_batch_id": j.anchor_batch_id, "status": j.status, "segments_total": len(plan.get("segments", [])), "segments_done": len(checkpoint.get("done_segments", [])), "error": j.error, "created_at": iso(j.created_at), "finished_at": iso(j.finished_at)}
+
 @app.post("/api/auth/login")
 def login(payload: LoginIn, db: Session = Depends(get_db)):
     user = db.execute(select(User).where(User.username == payload.username)).scalar_one_or_none()
@@ -83,7 +89,8 @@ def dashboard(db: Session = Depends(get_db), user: User = Depends(current_user))
     notices = db.execute(select(WorkNotice).order_by(WorkNotice.id)).scalars().all()
     resurveys = db.execute(select(Resurvey).order_by(Resurvey.id.desc())).scalars().all()
     jobs = db.execute(select(AnalysisJob).order_by(AnalysisJob.id.desc())).scalars().all()
-    return {"user": user_view(user), "stats": {"assets": len(assets), "points": len(points), "zones": len(zones), "open_zones": sum(z.status not in ["closed", "split"] for z in zones), "notices": len(notices), "resurveys": len(resurveys)}, "batches": [{"id": b.id, "batch_code": b.batch_code, "measured_at": iso(b.measured_at), "instrument": b.instrument, "coordinate_reference": b.coordinate_reference, "status": b.status, "notes": b.notes, "point_count": len(b.points)} for b in batches], "assets": [asset_view(a) for a in assets], "points": [point_view(p) for p in points], "zones": [zone_view(z, db) for z in zones], "notices": [notice_view(n) for n in notices], "resurveys": [resurvey_view(r) for r in resurveys], "jobs": [{"id": j.id, "job_code": j.job_code, "batch_id": j.batch_id, "status": j.status, "result": j.result, "error": j.error, "finished_at": iso(j.finished_at)} for j in jobs]}
+    lineage_jobs = db.execute(select(LineageJob).order_by(LineageJob.id.desc()).limit(10)).scalars().all()
+    return {"user": user_view(user), "stats": {"assets": len(assets), "points": len(points), "zones": len(zones), "open_zones": sum(z.status not in ["closed", "split"] for z in zones), "notices": len(notices), "resurveys": len(resurveys)}, "batches": [{"id": b.id, "batch_code": b.batch_code, "measured_at": iso(b.measured_at), "instrument": b.instrument, "coordinate_reference": b.coordinate_reference, "status": b.status, "notes": b.notes, "point_count": len(b.points)} for b in batches], "assets": [asset_view(a) for a in assets], "points": [point_view(p) for p in points], "zones": [zone_view(z, db) for z in zones], "notices": [notice_view(n) for n in notices], "resurveys": [resurvey_view(r) for r in resurveys], "jobs": [{"id": j.id, "job_code": j.job_code, "batch_id": j.batch_id, "status": j.status, "result": j.result, "error": j.error, "finished_at": iso(j.finished_at)} for j in jobs], "lineage_links": lineage_links_view(db), "lineage_jobs": [lineage_job_view(j) for j in lineage_jobs]}
 
 @app.get("/api/survey-batches/{batch_id}")
 def batch_detail(batch_id: int, db: Session = Depends(get_db), user: User = Depends(current_user)):
@@ -233,3 +240,30 @@ def verify_resurvey(resurvey_id: int, db: Session = Depends(get_db), user: User 
 def audit_logs(db: Session = Depends(get_db), user: User = Depends(require_roles("supervisor", "viewer"))):
     rows = db.execute(select(AuditLog).order_by(AuditLog.id.desc()).limit(80)).scalars().all()
     return [{"id": r.id, "action": r.action, "entity_type": r.entity_type, "entity_id": r.entity_id, "detail": r.detail, "created_at": iso(r.created_at)} for r in rows]
+
+@app.get("/api/lineage/manholes/{asset_code}/history")
+def lineage_manhole_history(asset_code: str, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    asset = db.execute(select(ManholeAsset).where(ManholeAsset.asset_code == asset_code)).scalar_one_or_none()
+    if not asset:
+        raise HTTPException(404, "井盖资产不存在")
+    return {"asset": asset_view(asset), "entries": manhole_history(db, asset)}
+
+@app.get("/api/lineage/jobs/{job_id}")
+def lineage_job_detail(job_id: int, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    job = db.get(LineageJob, job_id)
+    if not job:
+        raise HTTPException(404, "沿革任务不存在")
+    return lineage_job_view(job)
+
+@app.post("/api/lineage/rebuild/{batch_id}")
+def rebuild_lineage(batch_id: int, db: Session = Depends(get_db), user: User = Depends(require_roles("operator", "supervisor"))):
+    batch = db.get(SurveyBatch, batch_id)
+    if not batch:
+        raise HTTPException(404, "测量批次不存在")
+    if batch.status != "clustered":
+        raise HTTPException(409, "批次尚未出片，不能重算沿革")
+    job, created = enqueue_lineage(db, batch.id)
+    if created:
+        record(db, user.id, "enqueue_zone_lineage", "LineageJob", job.job_code, {"batch_code": batch.batch_code})
+        db.commit()
+    return {"job_id": job.id, "job_code": job.job_code, "status": job.status, "reused": not created}

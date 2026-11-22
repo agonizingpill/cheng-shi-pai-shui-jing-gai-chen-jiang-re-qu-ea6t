@@ -16,6 +16,9 @@
 - 对同一坐标基准的测量点执行 DBSCAN，使用局部密度评分排序维修片区。
 - 发现施工边界冲突时阻止直接施工，主管按道路边界拆分片区并保留原始聚类证据。
 - 施工联动单提交、主管确认、维修启动、复测提交和主管核验销项。
+- 相邻批次热区沿革：按井盖串接原始聚类，分裂/合并保留各支去向，漏测井盖标为待确认。
+- 迟到巡测批次单独成批出片后按巡测日期插回，旧关联标待更新，前后两段算齐后同事务替换。
+- 沿革任务断点续算，重试不新增同一段沿革；热区复核页可按井盖查历次归属。
 - JWT 三角色权限、审计日志、请求限流、Redis 异步任务和 worker 心跳。
 
 ## 一天的工作剧本
@@ -28,6 +31,14 @@
 6. 08:05，操作员为南河路热区提交 `SG-2026-NH-071` 施工联动单，主管确认后进入维修。
 7. 16:20，施工队提交同片区复测，沉降从约 11.95 mm 降到 6.4 mm。
 8. 16:30，主管核验通过，片区与施工联动单同时关闭。
+
+## 隔周沿革剧本
+
+1. 种子数据中 `SURV-2026-1107-AM` 已预出片，是沿革链起点。
+2. 1121 批次出片后，沿革任务自动把 1107→1121 串为两条 `continue` 关联。
+3. 迟到的 `SURV-2026-1114-PM` 单独出片后按巡测日期插回：1107→1121 旧关联先标 `待更新`，1107→1114 与 1114→1121 两段算齐后整段替换。
+4. 1114 批次漏测的 `MH-016`~`MH-020` 在归属表中标为 `漏测待确认`。
+5. 打开「热区复核」，片区卡片显示来源/去向各支；右侧「按井盖查沿革」输入 `MH-016` 可见 1107 入区 → 1114 漏测待确认 → 1121 回区。
 
 ## 快速启动
 
@@ -53,6 +64,12 @@ docker compose exec backend python -m scripts.seed_demo
 
 worker 使用固定参数 `DBSCAN(eps=26m, min_samples=3)` 对同一测量批次的二维投影坐标聚类。每个非噪声簇写入 `RepairZone`。局部密度评分为 `簇内点数 / 外接矩形面积 × 10,000`。坐标基准集合不为单一值时，后端以 `409 DATUM_CONFLICT` 拒绝聚类。算法输入、参数、结果摘要、失败状态和完成时间均写入 `AnalysisJob`。
 
+## 沿革口径
+
+批次出片（聚类成功）后自动触发 `LineageJob`，按 `measured_at` 把批次排成时间链，仅串接原始聚类（道路拆分片不参与）。相邻两批之间，共享井盖的热区连成关联边：一出度大于一为 `split`，一入度大于一为 `merge`，一对一为 `continue`；无来源为 `emerge`，无去向为 `dissolve`，各支去向都保留在 `ZoneLineageLink`。上一批热区成员在本批漏测的井盖写入 `ManholeZoneMembership`，标记 `pending_confirmation`（待确认）。
+
+迟到批次单独成批出片后，按巡测日期找到插入点，受影响旧关联先标 `pending_update`，插入点前后两段都计算完成（逐段提交断点）后，在同一个事务里删除旧关联、暂存链接转正、归属重写。任务中断后由 worker 启动恢复或 `POST /api/lineage/rebuild/{batch_id}` 触发续算；分段采用先清暂存再写入，重试不会新增同一段沿革。
+
 ## 技术栈与目录
 
 | 层 | 技术 |
@@ -68,8 +85,11 @@ worker 使用固定参数 `DBSCAN(eps=26m, min_samples=3)` 对同一测量批次
 ```text
 backend/src/models.py                 领域表与关联
 backend/src/services/cluster.py       DBSCAN 与局部密度评分
+backend/src/services/lineage.py       相邻批次沿革、断点续算与整段替换
 backend/src/main.py                   认证、领域路由、状态规则
 backend/scripts/seed_demo.py           幂等演示数据
+backend/tests/test_lineage.py          沿革引擎单元测试
+backend/tests/test_lineage_api.py      沿革接口测试
 frontend/src/app.js                   四个业务页面与交互
 frontend/src/api/client.js             API 封装
 frontend/src/styles.css                市政测绘图板视觉系统

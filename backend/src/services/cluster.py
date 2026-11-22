@@ -6,6 +6,7 @@ from sklearn.cluster import DBSCAN
 from sqlalchemy import select
 from ..models import AnalysisJob, RepairZone, SurveyBatch, SurveyPoint, WorkNotice
 from .geometry import bounds, overlaps
+from .lineage import enqueue_lineage, purge_batch_lineage
 
 EPS_METERS = 26.0
 MIN_SAMPLES = 3
@@ -36,6 +37,8 @@ def cluster_batch(db, job_id):
         matrix = np.array([[p["x"], p["y"]] for p in points], dtype=float)
         labels = DBSCAN(eps=EPS_METERS, min_samples=MIN_SAMPLES).fit_predict(matrix)
         existing = db.execute(select(RepairZone).where(RepairZone.batch_id == batch.id)).scalars().all()
+        if existing:
+            purge_batch_lineage(db, batch.id)
         for zone in existing:
             db.delete(zone)
         db.flush()
@@ -83,5 +86,6 @@ def cluster_batch(db, job_id):
         job.result = {"algorithm": "DBSCAN + local density score", "eps_m": EPS_METERS, "min_samples": MIN_SAMPLES, "cluster_count": cluster_count, "noise_count": noise_count, "conflicted_zones": conflicts, "point_count": len(points), "formula": "local_density = cluster_points / bbox_area × 10000"}
         job.status = "succeeded"; job.finished_at = datetime.now(timezone.utc)
         db.commit()
+        enqueue_lineage(db, batch.id)
     except Exception as exc:
         job.status = "failed"; job.error = str(exc); job.finished_at = datetime.now(timezone.utc); db.commit()
